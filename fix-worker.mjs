@@ -251,8 +251,10 @@ ${fileContents}
 ---
 请生成最小修复补丁（JSON）。`;
     let plan = null;
+    let lastRaw = "";
     for (let attempt = 0; attempt < 3 && !plan; attempt++) {
       const raw2 = await ask(PATCH_SYSTEM, patchUser, { maxTokens: 8192, temperature: 0.1, thinking: "disabled" });
+      lastRaw = raw2;
       plan = extractJSON(raw2);
       if (!plan) {
         log("attempt", attempt + 1, "bad JSON, retrying...");
@@ -260,7 +262,7 @@ ${fileContents}
       }
     }
     if (!plan) {
-      log("patch JSON 失败，原始输出片段：", String(raw2 ?? "").slice(0, 200).replace(/\n/g, " "));
+      log("patch JSON 失败，原始输出片段：", String(lastRaw ?? "").slice(0, 200).replace(/\n/g, " "));
       throw new Error(`model output not JSON (3 attempts)`);
     }
 
