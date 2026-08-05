@@ -228,7 +228,8 @@ async function mergeApprovedPR(pr) {
     if (pending.length === 0) break;
     await new Promise((r) => setTimeout(r, 10_000));
   }
-  const failed = (checks ?? []).filter((c) => ["FAILURE", "CANCELLED", "TIMED_OUT"].includes(c.conclusion));
+  // 合并门禁：只认 CI（测试）失败才阻止；AI Reviewer 结论忽略（ai-approved 标签即 review 通过信号）
+  const failed = (checks ?? []).filter((c) => /ci/i.test(c.name) && ["FAILURE", "CANCELLED", "TIMED_OUT"].includes(c.conclusion));
   if (failed.length > 0) {
     await commentPR(n, `${BOT_TAG}: CI 有失败（${failed.map((f) => f.name).join(", ")}），暂不合并。`);
     return;
