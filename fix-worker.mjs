@@ -143,7 +143,8 @@ async function finishPR(workdir, n, plan) {
     }
     throw e;
   }
-  await exec("git", ["push", "origin", branch], { cwd: workdir, timeout: 180_000 });
+  // force-with-lease：autofix 分支可能已存在（上次失败残留），普通 push 会 non-fast-forward 拒绝
+  await exec("git", ["push", "--force-with-lease", "origin", branch], { cwd: workdir, timeout: 180_000 });
   if (iterMode) {
     await exec("gh", ["pr", "comment", process.env.AUTOFIX_PR, "-R", REPO, "--body", "🤖 AutoFix: 已按 review 意见迭代修复，请重新 review。"], { timeout: 60_000 });
     return process.env.AUTOFIX_PR_URL || `https://github.com/${REPO}/pull/${process.env.AUTOFIX_PR}`;
@@ -249,7 +250,7 @@ ${fileContents}
 ---
 请生成最小修复补丁（JSON）。`;
     let plan = null;
-    for (let attempt = 0; attempt < 2 && !plan; attempt++) {
+    for (let attempt = 0; attempt < 3 && !plan; attempt++) {
       const raw2 = await ask(PATCH_SYSTEM, patchUser, { maxTokens: 8192, temperature: 0.1, thinking: "disabled" });
       plan = extractJSON(raw2);
       if (!plan) {

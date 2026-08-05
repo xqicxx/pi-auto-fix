@@ -115,7 +115,8 @@ async function reviewPR(pr) {
   if (existing?.stage === "review-done" || existing?.stage === "merged") return;
   const names = (pr.labels ?? []).map((l) => l.name);
   if (names.includes(TAGS.approve) || names.includes(TAGS.needsWork)) {
-    setPR(n, { stage: "review-done", verdict: names.includes(TAGS.approve) ? "approve" : "needs-work" });
+    // 保留 iterRound：review 不应重置迭代轮数，否则失败 PR 会无限重试（3 轮上限失效）
+    setPR(n, { stage: "review-done", verdict: names.includes(TAGS.approve) ? "approve" : "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
     return;
   }
   // 跳过 draft 和 base 不是 master 的 PR
@@ -142,12 +143,12 @@ ${comments.slice(0, 3000)}`;
   if (verdict.verdict === "approve") {
     await addLabels("pr", n, [TAGS.approve]);
     await commentPR(n, `${BOT_TAG}: **通过** ✅\n\n${sanitize(verdict.summary)}\n\n已标记 ai-approved，等待自动合并。`);
-    setPR(n, { stage: "review-done", verdict: "approve" });
+    setPR(n, { stage: "review-done", verdict: "approve", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
   } else {
     await addLabels("pr", n, [TAGS.needsWork]);
     const blockers = (verdict.blockers ?? []).slice(0, 5).map((b) => `- ${sanitize(b)}`).join("\n");
     await commentPR(n, `${BOT_TAG}: **需要修改** ❌\n\n${sanitize(verdict.summary)}\n\n阻断项:\n${blockers}`);
-    setPR(n, { stage: "review-done", verdict: "needs-work" });
+    setPR(n, { stage: "review-done", verdict: "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
   }
 }
 
