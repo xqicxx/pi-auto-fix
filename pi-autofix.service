@@ -13,6 +13,7 @@ Environment=NO_PROXY=localhost,127.0.0.1,api.telegram.org,.telegram.org,gateway.
 # 自动修复默认关闭（AUTOFIX_FIX=1 开启）；triage/review/merge 默认开启
 Environment=AUTOFIX_FIX=1
 Environment=AUTOFIX_REPO=xqicxx/pi-discord-openclaw
+Environment=AUTOFIX_REVIEW_ENGINE=github
 Environment=AUTOFIX_POLL_SECONDS=60
 Environment=HOME=/home/ubuntu
 ExecStart=/usr/bin/node /home/ubuntu/pi-auto-fix/bot.mjs

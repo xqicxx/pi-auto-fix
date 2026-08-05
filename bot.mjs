@@ -301,8 +301,11 @@ async function tick() {
     for (const issue of issues) {
       try { await triageIssue(issue); } catch (e) { log(`triage #${issue.number} err: ${e.message}`); }
     }
+    // review 引擎：github = GitHub Actions AI Reviewer（review.yml 打标签），local = 本进程 Gemini 自审。
+    // 推荐 github：审查记录在 GitHub 上、可回溯；local 仅作无 Actions 额度时的兜底。
+    const reviewEngine = process.env.AUTOFIX_REVIEW_ENGINE || "local";
     for (const pr of prs) {
-      try { await reviewPR(pr); } catch (e) { log(`review #${pr.number} err: ${e.message}`); }
+      try { if (reviewEngine === "local") await reviewPR(pr); } catch (e) { log(`review #${pr.number} err: ${e.message}`); }
     }
     for (const pr of prs) {
       try { await iterateNeedsWorkPR(pr); } catch (e) { log(`iterate #${pr.number} err: ${e.message}`); }
