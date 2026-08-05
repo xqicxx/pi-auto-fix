@@ -240,6 +240,10 @@ ${tree}`;
 
     // ② 读取文件内容，生成补丁
     const fileContents = await readFiles(workdir, paths);
+    const deepRound = Number(process.env.AUTOFIX_ROUND || 0);
+    const deepNote = deepRound > 3
+      ? String.fromCharCode(10) + "⚠️ 此前已迭代 " + (deepRound - 1) + " 轮均被 review 拒绝（拒绝意见见上方）。请彻底重新分析根因，提出与之前完全不同的修复方案；若原方向根本不对，明确指出并换思路，不要延续被拒的方案。"
+      : "";
     const patchUser = `Issue: ${issueTitle}
 ---
 ${(issueBody ?? "").slice(0, 4000)}
@@ -249,11 +253,11 @@ ${reviewContext}
 相关文件内容:
 ${fileContents}
 ---
-请生成最小修复补丁（JSON）。`;
+请生成最小修复补丁（JSON）。${deepNote}`;
     let plan = null;
     let lastRaw = "";
     for (let attempt = 0; attempt < 3 && !plan; attempt++) {
-      const raw2 = await ask(PATCH_SYSTEM, patchUser, { maxTokens: 8192, temperature: 0.1, thinking: "disabled" });
+      const raw2 = await ask(PATCH_SYSTEM, patchUser, { maxTokens: 8192, temperature: 0.1, thinking: deepRound > 3 ? "low" : "disabled" });
       lastRaw = raw2;
       plan = extractJSON(raw2);
       if (!plan) {

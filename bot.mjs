@@ -152,8 +152,8 @@ ${comments.slice(0, 3000)}`;
   }
 }
 
-// ================= 迭代修复 needs-work PR =================
-// ai-needs-work 的 PR：spawn fix-worker 迭代模式（AUTOFIX_PR），最多迭代 3 轮
+// 迭代轮数上限：3 常规 + 3 深修（换思路重新分析）。全部用尽才升级人工。
+const MAX_ITER_ROUNDS = 6;
 
 let iterateRunning = false;
 
@@ -162,12 +162,10 @@ async function iterateNeedsWorkPR(pr) {
   const n = pr.number;
   const names = (pr.labels ?? []).map((l) => l.name);
   if (!names.includes(TAGS.needsWork)) return;
-  const st = prState(n);
-  const round = st?.iterRound ?? 0;
-  if (round >= 3) {
-    // 3 轮耗尽：留人工介入提示（只提示一次），停止自动迭代
+  if (round >= MAX_ITER_ROUNDS) {
+    // 全部用尽：留总结评论（只提示一次），停止自动迭代
     if (!st?.escalated) {
-      await commentPR(n, `${BOT_TAG}: 已自动迭代 3 轮仍未通过 review，自动修复停止，请人工 review 或关闭。`);
+      await commentPR(n, `${BOT_TAG}: 已自动迭代 ${MAX_ITER_ROUNDS} 轮（含换思路深修）仍未通过 review，自动修复已尽力。请人工 review 或关闭。`);
       setPR(n, { ...st, escalated: true });
     }
     return;
@@ -178,7 +176,7 @@ async function iterateNeedsWorkPR(pr) {
   try {
     await new Promise((resolve, reject) => {
       const child = spawn("node", ["/home/ubuntu/pi-auto-fix/fix-worker.mjs"], {
-        env: { ...process.env, AUTOFIX_PR: String(n), AUTOFIX_PR_BRANCH: pr.headRefName, AUTOFIX_PR_URL: pr.url },
+        env: { ...process.env, AUTOFIX_PR: String(n), AUTOFIX_PR_BRANCH: pr.headRefName, AUTOFIX_PR_URL: pr.url, AUTOFIX_ROUND: String(round + 1) },
         stdio: "inherit",
       });
       const killer = setTimeout(() => { child.kill("SIGKILL"); }, 10 * 60_000);
