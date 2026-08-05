@@ -119,7 +119,16 @@ async function reviewPR(pr) {
   const names = (pr.labels ?? []).map((l) => l.name);
 
   if (REVIEW_ENGINE === "github-app") {
-    // 只认 GitHub bot（应用）的 review 结论：优先 gemini-code-assist，其次任何 [bot]（如 copilot）
+    // Actions AI Reviewer（Gemini 直连）已打标签 → 优先采用（Code Assist 未就绪时的兜底）
+    if (names.includes(TAGS.approve) || names.includes(TAGS.needsWork)) {
+      const v = names.includes(TAGS.approve) ? "approve" : "needs-work";
+      log(`review #${n}: Actions 标签 => ${v}`);
+      // 保留 merge-blocked（防 loop）：merge 已因保护规则停止时，标签变化不重置
+      const stage = existing?.stage === "merge-blocked" ? "merge-blocked" : "review-done";
+      setPR(n, { stage, verdict: v, ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+      return;
+    }
+    // 其次认 GitHub bot（应用）的 review 结论：优先 gemini-code-assist，其次任何 [bot]（如 copilot）
     const reviews = await prReviews(n);
     const bots = (reviews ?? []).filter((r) => /\[bot\]$/.test(r.author?.login ?? ""));
     const ca = bots.filter((r) => /gemini-code-assist/i.test(r.author?.login));
@@ -250,6 +259,7 @@ async function mergeApprovedPR(pr) {
   if (!names.includes(TAGS.approve)) return;
   const st = prState(n);
   if (st?.stage === "merged") return;
+  if (st?.stage === "merge-blocked" || (st?.mergeFails ?? 0) >= 3) return; // 已因保护规则停止重试，防 loop
   if (pr.mergeable !== "MERGEABLE" || pr.isDraft) {
     log(`merge #${n}: not mergeable`);
     return;
@@ -257,6 +267,7 @@ async function mergeApprovedPR(pr) {
   // 合并门禁：master 分支保护已要求 test check 通过（required status checks），
   // GitHub 原生拦截未绿合并——本地只做轻量检查，不轮询等待，下轮再试。
   const checks = await prStatusChecks(n);
+  if ((checks ?? []).length === 0) return; // CI 未跑（ai-approved 标签刚打，labeled 触发有延迟），下轮再试
   const pending = (checks ?? []).filter((c) => ["IN_PROGRESS", "QUEUED", "PENDING", "WAITING"].includes(c.state));
   if (pending.length > 0) return; // CI 还在跑，跳过本轮，下轮再试
   const failed = (checks ?? []).filter((c) => ["FAILURE", "CANCELLED", "TIMED_OUT"].includes(c.conclusion));
@@ -274,6 +285,15 @@ async function mergeApprovedPR(pr) {
     setPR(n, { stage: "merged" });
   } catch (err) {
     log(`merge #${n} failed: ${err.message}`);
+    const fails = (st?.mergeFails ?? 0) + 1;
+    if (fails >= 3) {
+      if (!st?.mergeBlockedCommented) {
+        await commentPR(n, `${BOT_TAG}: 自动合并连续失败 ${fails} 次（分支保护 required check 未满足，如缺 CI test）。已停止自动重试，请人工检查。`).catch(() => {});
+        setPR(n, { ...st, mergeFails: fails, mergeBlockedCommented: true, stage: "merge-blocked" });
+      }
+    } else {
+      setPR(n, { ...st, mergeFails: fails });
+    }
   }
 }
 
