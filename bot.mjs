@@ -162,6 +162,8 @@ async function iterateNeedsWorkPR(pr) {
   const n = pr.number;
   const names = (pr.labels ?? []).map((l) => l.name);
   if (!names.includes(TAGS.needsWork)) return;
+  const st = prState(n);
+  const round = st?.iterRound ?? 0;
   if (round >= MAX_ITER_ROUNDS) {
     // 全部用尽：留总结评论（只提示一次），停止自动迭代
     if (!st?.escalated) {
