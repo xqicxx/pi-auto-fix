@@ -7,7 +7,7 @@ import { ask, extractJSON, sanitize } from "./lib/model.mjs";
 import {
   listOpenIssues, listOpenPRs, getIssue, getPR,
   commentIssue, commentPR, addLabels, closeIssue, mergePR,
-  prDiff, prStatusChecks,
+  prDiff, prStatusChecks, prReviews,
 } from "./lib/gh.mjs";
 import { issueState, setIssue, prState, setPR } from "./lib/state.mjs";
 import { spawn } from "node:child_process";
@@ -116,57 +116,69 @@ const REVIEW_SYSTEM = `你是资深 code reviewer。审查 PR diff，输出 JSON
 async function reviewPR(pr) {
   const n = pr.number;
   const existing = prState(n);
-  if (existing?.stage === "review-done" || existing?.stage === "merged") return;
   const names = (pr.labels ?? []).map((l) => l.name);
-  if (names.includes(TAGS.approve) || names.includes(TAGS.needsWork)) {
-    // 保留 iterRound：review 不应重置迭代轮数，否则失败 PR 会无限重试（3 轮上限失效）
-    setPR(n, { stage: "review-done", verdict: names.includes(TAGS.approve) ? "approve" : "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
-    return;
-  }
-  // 跳过 draft 和 base 不是 master 的 PR
-  if (pr.isDraft) { setPR(n, { stage: "skip", reason: "draft" }); return; }
 
   if (REVIEW_ENGINE === "github-app") {
-    // 等 GitHub 上的 Gemini Code Assist 应用审查结论（需先安装该 app）
+    // ① GitHub 上的 Gemini Code Assist 有结论 → 以它为准（覆盖任何旧标签）
     const reviews = await prReviews(n);
     const ca = (reviews ?? []).filter((r) => /gemini-code-assist/i.test(r.author?.login ?? ""));
-    const last = ca[ca.length - 1];
-    if (!last) {
-      log(`review #${n}: 等待 Gemini Code Assist 审查...`);
+    const lastCa = ca[ca.length - 1];
+    if (lastCa && (lastCa.state === "APPROVED" || lastCa.state === "CHANGES_REQUESTED")) {
+      const already = existing?.stage === "review-done" && existing.verdict === (lastCa.state === "APPROVED" ? "approve" : "needs-work");
+      if (already) return;
+      log(`review #${n}: Code Assist=${lastCa.state}`);
+      if (lastCa.state === "APPROVED") {
+        await addLabels("pr", n, [TAGS.approve]);
+        await ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.needsWork]).catch(() => {});
+        await commentPR(n, `${BOT_TAG}: Gemini Code Assist 已通过 ✅，等待 CI 绿后自动合并。`);
+        setPR(n, { stage: "review-done", verdict: "approve", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+      } else {
+        await addLabels("pr", n, [TAGS.needsWork]);
+        await ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.approve]).catch(() => {});
+        await commentPR(n, `${BOT_TAG}: Gemini Code Assist 要求修改 ❌，进入自动迭代修复。`);
+        setPR(n, { stage: "review-done", verdict: "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+      }
       return;
     }
-    log(`review #${n}: Code Assist=${last.state}`);
-    if (last.state === "APPROVED") {
+    // ② Code Assist 尚未审查（GCP 配置未完成等）→ 本地 DeepSeek 兜底，保证闭环不停摆
+    if (existing?.stage === "review-done" || existing?.stage === "merged") return;
+    if (names.includes(TAGS.approve) || names.includes(TAGS.needsWork)) {
+      setPR(n, { stage: "review-done", verdict: names.includes(TAGS.approve) ? "approve" : "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+      return;
+    }
+    if (pr.isDraft) { setPR(n, { stage: "skip", reason: "draft" }); return; }
+    if (existing?.fallbackReviewed) return;
+    log(`review #${n}: 无 Code Assist 结论，DeepSeek 兜底审查`);
+    const diff = await prDiff(n);
+    if (!diff) { setPR(n, { stage: "skip", reason: "no-diff" }); return; }
+    const truncated = diff.length > 400000 ? diff.slice(0, 200000) + "\n...(diff 截断)...\n" + diff.slice(-200000) : diff;
+    const comments = (pr.comments ?? []).slice(-6).map((c) => `[${c.author?.login}] ${c.body?.slice(0, 600)}`).join("\n");
+    const user = `PR #${n}: ${pr.title}\n---\n${(pr.body ?? "").slice(0, 1500)}\n---\nDIFF:\n${truncated}\n---\nPR 评论:\n${comments.slice(0, 3000)}`;
+    const verdict = extractJSON(await ask(REVIEW_SYSTEM, user, { maxTokens: 8192 }));
+    if (!verdict?.verdict) { log(`review #${n}: parse failed`); return; }
+    const tag = `${BOT_TAG}（兜底审查，Gemini Code Assist 未就绪）`;
+    if (verdict.verdict === "approve") {
       await addLabels("pr", n, [TAGS.approve]);
-      await commentPR(n, `${BOT_TAG}: Gemini Code Assist 已通过 ✅，等待 CI 绿后自动合并。`);
-      setPR(n, { stage: "review-done", verdict: "approve", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
-    } else if (last.state === "CHANGES_REQUESTED") {
+      await commentPR(n, `${tag}: **通过** ✅\n\n${sanitize(verdict.summary)}\n\n已标记 ai-approved，等待自动合并。`);
+      setPR(n, { stage: "review-done", verdict: "approve", fallbackReviewed: true, ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+    } else {
       await addLabels("pr", n, [TAGS.needsWork]);
-      await commentPR(n, `${BOT_TAG}: Gemini Code Assist 要求修改 ❌，进入自动迭代修复。`);
-      setPR(n, { stage: "review-done", verdict: "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+      const blockers = (verdict.blockers ?? []).slice(0, 5).map((b) => `- ${sanitize(b)}`).join("\n");
+      await commentPR(n, `${tag}: **需要修改** ❌\n\n${sanitize(verdict.summary)}\n\n阻断项:\n${blockers}`);
+      setPR(n, { stage: "review-done", verdict: "needs-work", fallbackReviewed: true, ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
     }
     return;
   }
 
-  // local 引擎（DeepSeek 兜底）
+  // local 引擎（DeepSeek 直接审查，无兜底标记）
   log(`review PR #${n}: ${pr.title.slice(0, 50)}`);
   const diff = await prDiff(n);
   if (!diff) { setPR(n, { stage: "skip", reason: "no-diff" }); return; }
   const truncated = diff.length > 400000 ? diff.slice(0, 200000) + "\n...(diff 截断)...\n" + diff.slice(-200000) : diff;
   const comments = (pr.comments ?? []).slice(-6).map((c) => `[${c.author?.login}] ${c.body?.slice(0, 600)}`).join("\n");
-  const user = `PR #${n}: ${pr.title}
----
-${(pr.body ?? "").slice(0, 1500)}
----
-DIFF:
-${truncated}
----
-PR 评论:
-${comments.slice(0, 3000)}`;
-
+  const user = `PR #${n}: ${pr.title}\n---\n${(pr.body ?? "").slice(0, 1500)}\n---\nDIFF:\n${truncated}\n---\nPR 评论:\n${comments.slice(0, 3000)}`;
   const verdict = extractJSON(await ask(REVIEW_SYSTEM, user, { maxTokens: 8192 }));
   if (!verdict?.verdict) { log(`review #${n}: parse failed`); return; }
-
   if (verdict.verdict === "approve") {
     await addLabels("pr", n, [TAGS.approve]);
     await commentPR(n, `${BOT_TAG}: **通过** ✅\n\n${sanitize(verdict.summary)}\n\n已标记 ai-approved，等待自动合并。`);
