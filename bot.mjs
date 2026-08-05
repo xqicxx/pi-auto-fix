@@ -27,6 +27,11 @@ const TAGS = {
 
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
+// 崩溃防护：单点异常（残留未定义引用/gh 调用抛错）不应打死整个服务；状态在 state.json 幂等可恢复
+process.on("uncaughtException", (err) => {
+  log("uncaughtException:", err?.message ?? String(err));
+});
+
 // ================= triage =================
 
 const TRIAGE_SYSTEM = `你是 GitHub issue triage 助手。输出 JSON，不要其他文字。
@@ -45,6 +50,14 @@ async function triageIssue(issue) {
   const names = (issue.labels ?? []).map((l) => l.name);
   if (names.some((x) => Object.values(TAGS).includes(x))) {
     setIssue(n, { stage: "triage-done", verdict: "pre-labeled" });
+    return;
+  }
+  // [aw] 前缀 = gh-aw workflow 自报故障（AI Fixer/AI Reviewer 失败自报、No-Op Runs 等），
+  // 非真实代码缺陷；直接关闭，避免 bot 去"修" workflow 文件形成反馈环
+  if (/^\[aw\]/i.test(issue.title)) {
+    setIssue(n, { stage: "triage-done", verdict: "aw-noise" });
+    await commentIssue(n, `${BOT_TAG}: [aw] 前缀 issue 是 GitHub agentic workflow 自报的故障噪音，非代码缺陷；已自动关闭。`);
+    await closeIssue(n);
     return;
   }
   log(`triage issue #${n}: ${issue.title.slice(0, 50)}`);
@@ -163,14 +176,20 @@ async function iterateNeedsWorkPR(pr) {
       const killer = setTimeout(() => { child.kill("SIGKILL"); }, 10 * 60_000);
       child.on("exit", (code) => {
         clearTimeout(killer);
-        if (code === 0) {
-          // 移除 needs-work 标签，让下一轮 review 重新评估
-          ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.needsWork]).catch(() => {});
-          setPR(n, { stage: "iterated", iterRound: round + 1 });
-          resolve();
-        } else {
+        try {
+          if (code === 0) {
+            // 移除 needs-work 标签，让下一轮 review 重新评估
+            ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.needsWork]).catch(() => {});
+            setPR(n, { stage: "iterated", iterRound: round + 1 });
+            resolve();
+          } else {
+            setPR(n, { stage: "iterate-failed", iterRound: round + 1 });
+            reject(new Error(`iterate exit ${code}`));
+          }
+        } catch (err) {
+          log(`iterate #${n} exit handler error: ${err?.message ?? err}`);
           setPR(n, { stage: "iterate-failed", iterRound: round + 1 });
-          reject(new Error(`iterate exit ${code}`));
+          reject(err);
         }
       });
     });
