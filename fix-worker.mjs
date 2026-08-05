@@ -171,7 +171,6 @@ async function main() {
   // 模式 A：修复 issue（正常流程）
   let issueTitle = "";
   let issueBody = "";
-      reviewContext = "### AI Review 意见（必须修复）\n" + botComments[0].body.slice(0, 3000);
   if (ISSUE) {
     const { stdout: raw } = await exec("gh", ["issue", "view", ISSUE, "-R", REPO, "--json", "title,body,labels"], { encoding: "utf8" });
     const issue = JSON.parse(raw);
