@@ -206,12 +206,15 @@ async function main() {
     const pr = JSON.parse(raw);
     issueTitle = pr.title;
     issueBody = pr.body ?? "";
-    // 拉最后一条 bot review 评论
-    const { stdout: rawc } = await exec("gh", ["pr", "view", PR_ITER, "-R", REPO, "--json", "comments"], { encoding: "utf8" });
+    // 拉最后一条 bot review 评论 + Gemini Code Assist review 结论
+    const { stdout: rawc } = await exec("gh", ["pr", "view", PR_ITER, "-R", REPO, "--json", "comments,reviews"], { encoding: "utf8" });
     const prc = JSON.parse(rawc);
     const botComments = (prc.comments ?? []).filter((c) => (c.body ?? "").includes("AutoFix")).reverse();
-    if (botComments.length > 0) {
-      reviewContext = "### AI Review 意见（必须修复）" + String.fromCharCode(10) + botComments[0].body.slice(0, 3000);
+    const caReviews = (prc.reviews ?? []).filter((r) => /gemini-code-assist/i.test(r.author?.login ?? "") && (r.body ?? "").trim()).reverse();
+    const caBody = caReviews[0]?.body?.slice(0, 3000);
+    if (botComments.length > 0 || caBody) {
+      reviewContext = "### AI Review 意见（必须修复）" + String.fromCharCode(10) + (botComments[0]?.body ?? "").slice(0, 3000)
+        + (caBody ? String.fromCharCode(10) + "### Gemini Code Assist 意见" + String.fromCharCode(10) + caBody : "");
     }
     log("iterating PR #" + PR_ITER + ":", pr.title.slice(0, 60));
   }
