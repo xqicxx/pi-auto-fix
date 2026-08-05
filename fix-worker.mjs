@@ -124,13 +124,15 @@ async function prepareBranch(workdir, n) {
     await exec("git", ["fetch", "origin", branch], { cwd: workdir, timeout: 60_000 });
     await exec("git", ["checkout", "-B", branch, "FETCH_HEAD"], { cwd: workdir, timeout: 30_000 });
   } else {
-    await exec("git", ["checkout", "-b", `autofix/issue-${n}`], { cwd: workdir });
+    const attempt = Number(process.env.AUTOFIX_ATTEMPT || 1);
+    await exec("git", ["checkout", "-b", `autofix/issue-${n}${attempt > 1 ? "-v" + attempt : ""}`], { cwd: workdir });
   }
 }
 
 async function finishPR(workdir, n, plan) {
   const iterMode = !!process.env.AUTOFIX_PR;
-  const branch = iterMode ? process.env.AUTOFIX_PR_BRANCH : `autofix/issue-${n}`;
+  const attempt = Number(process.env.AUTOFIX_ATTEMPT || 1);
+  const branch = iterMode ? process.env.AUTOFIX_PR_BRANCH : `autofix/issue-${n}${attempt > 1 ? "-v" + attempt : ""}`;
   await exec("git", ["add", "-A"], { cwd: workdir });
   try {
     await exec("git", ["commit", "-m", iterMode ? "fix: 迭代修复 (AI review 意见)" : `fix: 自动修复 Issue #${n}`], { cwd: workdir, timeout: 60_000 });

@@ -191,8 +191,10 @@ async function reviewPR(pr) {
   }
 }
 
-// 迭代轮数上限：3 常规 + 3 深修（换思路重新分析）。全部用尽才升级人工。
+// 迭代轮数上限：3 常规 + 3 深修（换思路重新分析）。
 const MAX_ITER_ROUNDS = 6;
+// 每 issue 最大修复尝试次数：迭代用尽后自动关旧 PR、开全新尝试（新分支重新分析），全部用尽才升级人工
+const MAX_FRESH_ATTEMPTS = 3;
 
 let iterateRunning = false;
 
@@ -204,9 +206,21 @@ async function iterateNeedsWorkPR(pr) {
   const st = prState(n);
   const round = st?.iterRound ?? 0;
   if (round >= MAX_ITER_ROUNDS) {
-    // 全部用尽：留总结评论（只提示一次），停止自动迭代
+    // 迭代轮用尽：若尝试次数未到上限 → 关闭旧 PR，开全新修复尝试（新分支重新分析）
+    const m = /fix #(\d+)/.exec(pr.title ?? "");
+    const issueN = m ? Number(m[1]) : null;
+    const attempt = (issueN ? issueState(issueN)?.attempt : undefined) ?? 1;
+    if (attempt < MAX_FRESH_ATTEMPTS) {
+      log(`PR #${n} 迭代用尽，关闭并开启全新尝试 (attempt ${attempt + 1}/${MAX_FRESH_ATTEMPTS})，issue #${issueN ?? "?"}`);
+      await commentPR(n, `${BOT_TAG}: 迭代 ${MAX_ITER_ROUNDS} 轮仍未通过，关闭本 PR，开启全新修复尝试（attempt ${attempt + 1}/${MAX_FRESH_ATTEMPTS}，新分支重新分析）。`);
+      await closePR(n).catch((err) => log(`close #${n} err: ${err?.message}`));
+      setPR(n, { stage: "closed-attempt", verdict: "needs-work", iterRound: MAX_ITER_ROUNDS });
+      if (issueN) setIssue(issueN, { stage: "ready", attempt: attempt + 1 });
+      return;
+    }
+    // 全部尝试用尽：留总结评论（只提示一次）
     if (!st?.escalated) {
-      await commentPR(n, `${BOT_TAG}: 已自动迭代 ${MAX_ITER_ROUNDS} 轮（含换思路深修）仍未通过 review，自动修复已尽力。请人工 review 或关闭。`);
+      await commentPR(n, `${BOT_TAG}: 已尝试 ${MAX_FRESH_ATTEMPTS} 次（每次 ${MAX_ITER_ROUNDS} 轮迭代）仍未通过 review，自动修复已尽力。请人工 review 或关闭。`);
       setPR(n, { ...st, escalated: true });
     }
     return;
@@ -308,7 +322,7 @@ async function fixIssue(issue) {
   try {
     await new Promise((resolve, reject) => {
       const child = spawn("node", ["/home/ubuntu/pi-auto-fix/fix-worker.mjs"], {
-        env: { ...process.env, AUTOFIX_ISSUE: String(n) },
+        env: { ...process.env, AUTOFIX_ISSUE: String(n), AUTOFIX_ATTEMPT: String(issueState(n)?.attempt ?? 1) },
         stdio: "inherit",
       });
       const killer = setTimeout(() => { child.kill("SIGKILL"); }, 10 * 60_000);
