@@ -317,12 +317,14 @@ async function fixIssue(issue) {
     return;
   }
   log(`fix issue #${n}: ${issue.title.slice(0, 50)}`);
-  setIssue(n, { stage: "fix-running" });
+  // 保留 attempt（关旧开新时 setIssue ready+attempt；此处不能覆盖，否则分支不带 -vN 且尝试上限失效）
+  const attempt = issueState(n)?.attempt ?? 1;
+  setIssue(n, { stage: "fix-running", attempt });
   fixRunning = true;
   try {
     await new Promise((resolve, reject) => {
       const child = spawn("node", ["/home/ubuntu/pi-auto-fix/fix-worker.mjs"], {
-        env: { ...process.env, AUTOFIX_ISSUE: String(n), AUTOFIX_ATTEMPT: String(issueState(n)?.attempt ?? 1) },
+        env: { ...process.env, AUTOFIX_ISSUE: String(n), AUTOFIX_ATTEMPT: String(attempt) },
         stdio: "inherit",
       });
       const killer = setTimeout(() => { child.kill("SIGKILL"); }, 10 * 60_000);
