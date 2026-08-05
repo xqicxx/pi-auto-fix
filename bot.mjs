@@ -165,7 +165,7 @@ async function iterateNeedsWorkPR(pr) {
         clearTimeout(killer);
         if (code === 0) {
           // 移除 needs-work 标签，让下一轮 review 重新评估
-          ghRawNoOp(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.needsWork]).catch(() => {});
+          ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.needsWork]).catch(() => {});
           setPR(n, { stage: "iterated", iterRound: round + 1 });
           resolve();
         } else {
