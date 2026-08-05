@@ -11,6 +11,7 @@ import {
 } from "./lib/gh.mjs";
 import { issueState, setIssue, prState, setPR } from "./lib/state.mjs";
 import { spawn } from "node:child_process";
+import { ghRaw } from "./lib/gh.mjs";
 import { ensureLabels } from "./lib/labels.mjs";
 
 const POLL_SECONDS = Number(process.env.AUTOFIX_POLL_SECONDS || 60);
@@ -137,6 +138,49 @@ ${comments.slice(0, 3000)}`;
   }
 }
 
+// ================= 迭代修复 needs-work PR =================
+// ai-needs-work 的 PR：spawn fix-worker 迭代模式（AUTOFIX_PR），最多迭代 3 轮
+
+let iterateRunning = false;
+
+async function iterateNeedsWorkPR(pr) {
+  if (iterateRunning) return;
+  const n = pr.number;
+  const names = (pr.labels ?? []).map((l) => l.name);
+  if (!names.includes(TAGS.needsWork)) return;
+  const st = prState(n);
+  const round = st?.iterRound ?? 0;
+  if (round >= 3) return; // 最多 3 轮
+  log(`iterate PR #${n} (round ${round + 1})`);
+  iterateRunning = true;
+  setPR(n, { stage: "iterating", iterRound: round + 1 });
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn("node", ["/home/ubuntu/pi-auto-fix/fix-worker.mjs"], {
+        env: { ...process.env, AUTOFIX_PR: String(n) },
+        stdio: "inherit",
+      });
+      const killer = setTimeout(() => { child.kill("SIGKILL"); }, 10 * 60_000);
+      child.on("exit", (code) => {
+        clearTimeout(killer);
+        if (code === 0) {
+          // 移除 needs-work 标签，让下一轮 review 重新评估
+          ghRawNoOp(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.needsWork]).catch(() => {});
+          setPR(n, { stage: "iterated", iterRound: round + 1 });
+          resolve();
+        } else {
+          setPR(n, { stage: "iterate-failed", iterRound: round + 1 });
+          reject(new Error(`iterate exit ${code}`));
+        }
+      });
+    });
+  } catch (e) {
+    log(`iterate #${n} failed: ${e.message}`);
+  } finally {
+    iterateRunning = false;
+  }
+}
+
 // ================= merge =================
 
 async function mergeApprovedPR(pr) {
@@ -232,6 +276,9 @@ async function tick() {
     }
     for (const pr of prs) {
       try { await reviewPR(pr); } catch (e) { log(`review #${pr.number} err: ${e.message}`); }
+    }
+    for (const pr of prs) {
+      try { await iterateNeedsWorkPR(pr); } catch (e) { log(`iterate #${pr.number} err: ${e.message}`); }
     }
     for (const pr of prs) {
       try { await mergeApprovedPR(pr); } catch (e) { log(`merge #${pr.number} err: ${e.message}`); }
