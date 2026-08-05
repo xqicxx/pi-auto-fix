@@ -117,15 +117,17 @@ async function runTests(workdir, testHint) {
 }
 
 async function openPR(workdir, n, plan) {
-  const branch = `autofix/issue-${n}`;
   if (process.env.AUTOFIX_PR) {
-    // 迭代模式：checkout 已有分支
+    // 迭代模式：用已有 PR 的分支（AUTOFIX_PR_BRANCH 传入）
+    const branch = process.env.AUTOFIX_PR_BRANCH;
     await exec("git", ["fetch", "origin", branch], { cwd: workdir, timeout: 60_000 });
     await exec("git", ["checkout", branch], { cwd: workdir, timeout: 30_000 });
     await exec("git", ["add", "-A"], { cwd: workdir });
-    await exec("git", ["commit", "-m", `fix: 迭代修复 Issue #${n} (AI review 意见)`], { cwd: workdir, timeout: 60_000 });
+    await exec("git", ["commit", "-m", `fix: 迭代修复 (AI review 意见)`], { cwd: workdir, timeout: 60_000 });
     await exec("git", ["push", "origin", branch], { cwd: workdir, timeout: 180_000 });
+    return process.env.AUTOFIX_PR_URL || `https://github.com/${REPO}/pull/${process.env.AUTOFIX_PR}`;
   } else {
+  const branch = `autofix/issue-${n}`;
     await exec("git", ["checkout", "-b", branch], { cwd: workdir });
     await exec("git", ["add", "-A"], { cwd: workdir });
     await exec("git", ["commit", "-m", `fix: 自动修复 Issue #${n}`], { cwd: workdir, timeout: 60_000 });
@@ -171,6 +173,7 @@ async function main() {
   // 模式 A：修复 issue（正常流程）
   let issueTitle = "";
   let issueBody = "";
+  let reviewContext = "";
   if (ISSUE) {
     const { stdout: raw } = await exec("gh", ["issue", "view", ISSUE, "-R", REPO, "--json", "title,body,labels"], { encoding: "utf8" });
     const issue = JSON.parse(raw);

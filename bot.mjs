@@ -157,7 +157,7 @@ async function iterateNeedsWorkPR(pr) {
   try {
     await new Promise((resolve, reject) => {
       const child = spawn("node", ["/home/ubuntu/pi-auto-fix/fix-worker.mjs"], {
-        env: { ...process.env, AUTOFIX_PR: String(n) },
+        env: { ...process.env, AUTOFIX_PR: String(n), AUTOFIX_PR_BRANCH: pr.headRefName, AUTOFIX_PR_URL: pr.url },
         stdio: "inherit",
       });
       const killer = setTimeout(() => { child.kill("SIGKILL"); }, 10 * 60_000);
