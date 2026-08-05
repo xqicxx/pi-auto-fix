@@ -7,7 +7,7 @@ import { ask, extractJSON, sanitize } from "./lib/model.mjs";
 import {
   listOpenIssues, listOpenPRs, getIssue, getPR,
   commentIssue, commentPR, addLabels, closeIssue, mergePR,
-  prDiff, prStatusChecks, prReviews,
+  prDiff, prStatusChecks, prReviews, closePR,
 } from "./lib/gh.mjs";
 import { issueState, setIssue, prState, setPR } from "./lib/state.mjs";
 import { spawn } from "node:child_process";
