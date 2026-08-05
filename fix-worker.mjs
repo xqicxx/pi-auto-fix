@@ -116,22 +116,37 @@ async function runTests(workdir, testHint) {
   return false;
 }
 
-async function openPR(workdir, n, plan) {
-  if (process.env.AUTOFIX_PR) {
-    // 迭代模式：用已有 PR 的分支（AUTOFIX_PR_BRANCH 传入）
+async function prepareBranch(workdir, n) {
+  // 先切分支再应用补丁（迭代模式切已有分支，issue 模式建新分支）
+  const iterMode = !!process.env.AUTOFIX_PR;
+  if (iterMode) {
     const branch = process.env.AUTOFIX_PR_BRANCH;
     await exec("git", ["fetch", "origin", branch], { cwd: workdir, timeout: 60_000 });
-    await exec("git", ["checkout", branch], { cwd: workdir, timeout: 30_000 });
-    await exec("git", ["add", "-A"], { cwd: workdir });
-    await exec("git", ["commit", "-m", `fix: 迭代修复 (AI review 意见)`], { cwd: workdir, timeout: 60_000 });
-    await exec("git", ["push", "origin", branch], { cwd: workdir, timeout: 180_000 });
-    return process.env.AUTOFIX_PR_URL || `https://github.com/${REPO}/pull/${process.env.AUTOFIX_PR}`;
+    await exec("git", ["checkout", "-B", branch, "FETCH_HEAD"], { cwd: workdir, timeout: 30_000 });
   } else {
-  const branch = `autofix/issue-${n}`;
-    await exec("git", ["checkout", "-b", branch], { cwd: workdir });
-    await exec("git", ["add", "-A"], { cwd: workdir });
-    await exec("git", ["commit", "-m", `fix: 自动修复 Issue #${n}`], { cwd: workdir, timeout: 60_000 });
-    await exec("git", ["push", "origin", branch], { cwd: workdir, timeout: 180_000 });
+    await exec("git", ["checkout", "-b", `autofix/issue-${n}`], { cwd: workdir });
+  }
+}
+
+async function finishPR(workdir, n, plan) {
+  const iterMode = !!process.env.AUTOFIX_PR;
+  const branch = iterMode ? process.env.AUTOFIX_PR_BRANCH : `autofix/issue-${n}`;
+  await exec("git", ["add", "-A"], { cwd: workdir });
+  try {
+    await exec("git", ["commit", "-m", iterMode ? "fix: 迭代修复 (AI review 意见)" : `fix: 自动修复 Issue #${n}`], { cwd: workdir, timeout: 60_000 });
+  } catch (e) {
+    // 无变化（nothing to commit）→ 视为已完成，不 push
+    const msg = String(e.stdout || e.stderr || e.message);
+    if (/nothing to commit|no changes added/i.test(msg)) {
+      log("no changes vs PR branch, skip push");
+      return process.env.AUTOFIX_PR_URL || `https://github.com/${REPO}/pull/${process.env.AUTOFIX_PR}`;
+    }
+    throw e;
+  }
+  await exec("git", ["push", "origin", branch], { cwd: workdir, timeout: 180_000 });
+  if (iterMode) {
+    await exec("gh", ["pr", "comment", process.env.AUTOFIX_PR, "-R", REPO, "--body", "🤖 AutoFix: 已按 review 意见迭代修复，请重新 review。"], { timeout: 60_000 });
+    return process.env.AUTOFIX_PR_URL || `https://github.com/${REPO}/pull/${process.env.AUTOFIX_PR}`;
   }
 
   const filesList = (plan.files ?? []).map((f) => `- \`${f.path}\``).join("\n");
@@ -245,16 +260,24 @@ ${fileContents}
     if (!plan) throw new Error("model output not JSON (2 attempts)");
 
     if (!plan?.files?.length) {
-      await commentIssue(ISSUE, `🤖 AutoFix: 本次无法自动修复。\n\n${sanitize(plan?.analysis ?? "模型未给出方案")}`);
+      const why = sanitize(plan?.analysis ?? "模型未给出方案");
+      if (process.env.AUTOFIX_PR) {
+        await exec("gh", ["pr", "comment", process.env.AUTOFIX_PR, "-R", REPO, "--body", "🤖 AutoFix: 本次无法继续迭代修复。\n\n" + why], { timeout: 60_000 });
+      } else {
+        await commentIssue(ISSUE, `🤖 AutoFix: 本次无法自动修复。\n\n${why}`);
+      }
       log("no patch, commented");
       process.exit(0);
     }
 
-    // ③ 应用 → 测试 → PR
+    // ③ 切分支 → 应用 → 测试 → 提交 PR
+    await prepareBranch(workdir, ISSUE);
     await applyPatch(workdir, plan.files);
     await runTests(workdir, plan.test);
-    const prUrl = await openPR(workdir, ISSUE, plan);
-    await commentIssue(ISSUE, `🤖 AutoFix: 已创建修复 PR → ${prUrl}\n\n根因: ${sanitize(plan.analysis ?? "")}`);
+    const prUrl = await finishPR(workdir, ISSUE, plan);
+    if (!process.env.AUTOFIX_PR) {
+      await commentIssue(ISSUE, `🤖 AutoFix: 已创建修复 PR → ${prUrl}\n\n根因: ${sanitize(plan.analysis ?? "")}`);
+    }
     log("done:", prUrl);
   } finally {
     rmSync(workdir, { recursive: true, force: true });
