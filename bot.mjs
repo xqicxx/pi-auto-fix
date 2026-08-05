@@ -46,18 +46,18 @@ async function triageIssue(issue) {
   const n = issue.number;
   const existing = issueState(n);
   if (existing?.stage === "triage-done") return;
-  // 已有标签则跳过
-  const names = (issue.labels ?? []).map((l) => l.name);
-  if (names.some((x) => Object.values(TAGS).includes(x))) {
-    setIssue(n, { stage: "triage-done", verdict: "pre-labeled" });
-    return;
-  }
   // [aw] 前缀 = gh-aw workflow 自报故障（AI Fixer/AI Reviewer 失败自报、No-Op Runs 等），
-  // 非真实代码缺陷；直接关闭，避免 bot 去"修" workflow 文件形成反馈环
+  // 非真实代码缺陷；无论是否已打标都直接关闭，避免 bot 去"修" workflow 文件形成反馈环
   if (/^\[aw\]/i.test(issue.title)) {
     setIssue(n, { stage: "triage-done", verdict: "aw-noise" });
     await commentIssue(n, `${BOT_TAG}: [aw] 前缀 issue 是 GitHub agentic workflow 自报的故障噪音，非代码缺陷；已自动关闭。`);
     await closeIssue(n);
+    return;
+  }
+  // 已有标签则跳过
+  const names = (issue.labels ?? []).map((l) => l.name);
+  if (names.some((x) => Object.values(TAGS).includes(x))) {
+    setIssue(n, { stage: "triage-done", verdict: "pre-labeled" });
     return;
   }
   log(`triage issue #${n}: ${issue.title.slice(0, 50)}`);
