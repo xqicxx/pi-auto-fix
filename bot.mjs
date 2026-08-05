@@ -7,9 +7,10 @@ import { ask, extractJSON, sanitize } from "./lib/model.mjs";
 import {
   listOpenIssues, listOpenPRs, getIssue, getPR,
   commentIssue, commentPR, addLabels, closeIssue, mergePR,
-  prDiff, prChecks,
+  prDiff, prStatusChecks,
 } from "./lib/gh.mjs";
 import { issueState, setIssue, prState, setPR } from "./lib/state.mjs";
+import { spawn } from "node:child_process";
 import { ensureLabels } from "./lib/labels.mjs";
 
 const POLL_SECONDS = Number(process.env.AUTOFIX_POLL_SECONDS || 60);
@@ -151,7 +152,7 @@ async function mergeApprovedPR(pr) {
   // 检查 CI（等待最多 3 分钟）
   let checks = [];
   for (let i = 0; i < 18; i++) {
-    checks = await prChecks(n);
+    checks = await prStatusChecks(n);
     const pending = (checks ?? []).filter((c) => ["IN_PROGRESS", "QUEUED", "PENDING", "WAITING"].includes(c.state));
     if (pending.length === 0) break;
     await new Promise((r) => setTimeout(r, 10_000));
@@ -172,18 +173,19 @@ async function mergeApprovedPR(pr) {
 }
 
 // ================= 修复（开 PR） =================
-// 注意：自动修复涉及写代码，风险最高。默认只对 ai-worth-fixing 且
-// 未开过 PR 的 issue 执行；由 FIX_ENABLED 环境变量控制（默认 off）。
+// 真实调度：串行 spawn fix-worker.mjs（一次只跑一个，防 clone 冲突）
 
 const FIX_ENABLED = process.env.AUTOFIX_FIX === "1";
+let fixRunning = false;
 
 async function fixIssue(issue) {
   if (!FIX_ENABLED) return;
+  if (fixRunning) return; // 串行：上一次还没跑完就等下一轮
   const n = issue.number;
   const names = (issue.labels ?? []).map((l) => l.name);
   if (!names.includes(TAGS.fix)) return;
   const st = issueState(n);
-  if (st?.stage === "fix-pr-opened" || st?.stage === "done") return;
+  if (st?.stage === "fix-pr-opened" || st?.stage === "done" || st?.stage === "fix-running") return;
   // 已有关联 PR 则跳过（按标题前缀识别）
   const prs = await listOpenPRs();
   if (prs.some((p) => (p.title ?? "").includes(`fix #${n}`))) {
@@ -191,11 +193,32 @@ async function fixIssue(issue) {
     return;
   }
   log(`fix issue #${n}: ${issue.title.slice(0, 50)}`);
-  setIssue(n, { stage: "fix-started" });
-  // TODO: 完整修复执行器（clone → 模型生成补丁 → 提交 → 开 PR）
-  // 此版本先打占位评论，修复器独立实现（见 fix-worker 计划）
-  await commentIssue(n, `${BOT_TAG}: 已进入修复队列（修复执行器建设中）。`);
-  setIssue(n, { stage: "fix-pr-opened", via: "placeholder" });
+  setIssue(n, { stage: "fix-running" });
+  fixRunning = true;
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn("node", ["/home/ubuntu/pi-auto-fix/fix-worker.mjs"], {
+        env: { ...process.env, AUTOFIX_ISSUE: String(n) },
+        stdio: "inherit",
+      });
+      const killer = setTimeout(() => { child.kill("SIGKILL"); }, 10 * 60_000);
+      child.on("exit", (code) => {
+        clearTimeout(killer);
+        if (code === 0) {
+          setIssue(n, { stage: "fix-pr-opened", via: "worker" });
+          resolve();
+        } else {
+          setIssue(n, { stage: "fix-failed", code });
+          reject(new Error(`fix-worker exit ${code}`));
+        }
+      });
+    });
+  } catch (e) {
+    log(`fix #${n} worker failed: ${e.message}`);
+    await commentIssue(n, `${BOT_TAG}: 自动修复执行失败（${e.message}），请人工介入或稍后重试。`);
+  } finally {
+    fixRunning = false;
+  }
 }
 
 // ================= 主循环 =================
