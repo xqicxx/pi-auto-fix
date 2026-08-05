@@ -155,6 +155,8 @@ async function finishPR(workdir, n, plan) {
   const body = [
     "🤖 AutoFix PR（自动生成）",
     "",
+    `Fixes #${n}`,
+    "",
     "## 根因",
     "",
     sanitize(plan.analysis ?? ""),
