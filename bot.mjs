@@ -247,18 +247,17 @@ async function mergeApprovedPR(pr) {
     log(`merge #${n}: not mergeable`);
     return;
   }
-  // 检查 CI（等待最多 3 分钟）
-  let checks = [];
-  for (let i = 0; i < 18; i++) {
-    checks = await prStatusChecks(n);
-    const pending = (checks ?? []).filter((c) => ["IN_PROGRESS", "QUEUED", "PENDING", "WAITING"].includes(c.state));
-    if (pending.length === 0) break;
-    await new Promise((r) => setTimeout(r, 10_000));
-  }
-  // 合并门禁：只认 CI（测试）失败才阻止；AI Reviewer 结论忽略（ai-approved 标签即 review 通过信号）
-  const failed = (checks ?? []).filter((c) => /ci/i.test(c.name) && ["FAILURE", "CANCELLED", "TIMED_OUT"].includes(c.conclusion));
+  // 合并门禁：master 分支保护已要求 test check 通过（required status checks），
+  // GitHub 原生拦截未绿合并——本地只做轻量检查，不轮询等待，下轮再试。
+  const checks = await prStatusChecks(n);
+  const pending = (checks ?? []).filter((c) => ["IN_PROGRESS", "QUEUED", "PENDING", "WAITING"].includes(c.state));
+  if (pending.length > 0) return; // CI 还在跑，跳过本轮，下轮再试
+  const failed = (checks ?? []).filter((c) => ["FAILURE", "CANCELLED", "TIMED_OUT"].includes(c.conclusion));
   if (failed.length > 0) {
-    await commentPR(n, `${BOT_TAG}: CI 有失败（${failed.map((f) => f.name).join(", ")}），暂不合并。`);
+    if (!st?.ciCommented) {
+      await commentPR(n, `${BOT_TAG}: CI 有失败（${failed.map((f) => f.name).join(", ")}），暂不合并。`);
+      setPR(n, { ...st, ciCommented: true });
+    }
     return;
   }
   try {
