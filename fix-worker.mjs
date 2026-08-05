@@ -259,7 +259,10 @@ ${fileContents}
         await new Promise((r) => setTimeout(r, 2000));
       }
     }
-    if (!plan) throw new Error("model output not JSON (2 attempts)");
+    if (!plan) {
+      log("patch JSON 失败，原始输出片段：", String(raw2 ?? "").slice(0, 200).replace(/\n/g, " "));
+      throw new Error(`model output not JSON (3 attempts)`);
+    }
 
     if (!plan?.files?.length) {
       const why = sanitize(plan?.analysis ?? "模型未给出方案");
