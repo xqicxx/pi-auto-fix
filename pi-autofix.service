@@ -1,0 +1,24 @@
+[Unit]
+Description=pi-auto-fix — 全自动 GitHub issue 闭环 bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/pi-auto-fix
+Environment=NODE_USE_ENV_PROXY=1
+Environment=NO_PROXY=localhost,127.0.0.1,api.telegram.org,.telegram.org,gateway.discord.gg,discord.com,discordapp.com,discord.gg,discord.media,cdn.discordapp.com,opencode.ai
+# 自动修复默认关闭（AUTOFIX_FIX=1 开启）；triage/review/merge 默认开启
+Environment=AUTOFIX_FIX=1
+Environment=AUTOFIX_REPO=xqicxx/pi-discord-openclaw
+Environment=AUTOFIX_POLL_SECONDS=60
+Environment=HOME=/home/ubuntu
+ExecStart=/usr/bin/node /home/ubuntu/pi-auto-fix/bot.mjs
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
