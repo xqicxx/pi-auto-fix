@@ -164,7 +164,14 @@ async function iterateNeedsWorkPR(pr) {
   if (!names.includes(TAGS.needsWork)) return;
   const st = prState(n);
   const round = st?.iterRound ?? 0;
-  if (round >= 3) return; // 最多 3 轮
+  if (round >= 3) {
+    // 3 轮耗尽：留人工介入提示（只提示一次），停止自动迭代
+    if (!st?.escalated) {
+      await commentPR(n, `${BOT_TAG}: 已自动迭代 3 轮仍未通过 review，自动修复停止，请人工 review 或关闭。`);
+      setPR(n, { ...st, escalated: true });
+    }
+    return;
+  }
   log(`iterate PR #${n} (round ${round + 1})`);
   iterateRunning = true;
   setPR(n, { stage: "iterating", iterRound: round + 1 });
