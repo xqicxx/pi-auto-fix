@@ -7,7 +7,7 @@ import { ask, extractJSON, sanitize } from "./lib/model.mjs";
 import {
   listOpenIssues, listOpenPRs, getIssue, getPR,
   commentIssue, commentPR, addLabels, closeIssue, mergePR,
-  prDiff, prStatusChecks, prReviews, closePR,
+  prDiff, prStatusChecks, prReviews, closePR, prFailedCheckDetails,
 } from "./lib/gh.mjs";
 import { issueState, setIssue, prState, setPR } from "./lib/state.mjs";
 import { spawn, execFile } from "node:child_process";
@@ -287,6 +287,14 @@ async function mergeApprovedPR(pr) {
   const pending = (checks ?? []).filter((c) => ["IN_PROGRESS", "QUEUED", "PENDING", "WAITING"].includes(c.state));
   if (pending.length > 0) return; // CI 还在跑，跳过本轮，下轮再试
   const failed = (checks ?? []).filter((c) => ["FAILURE", "CANCELLED", "TIMED_OUT"].includes(c.conclusion));
+  // runner 队列问题导致 cancelled（排队超时取消，非代码失败）→ 自动 rerun 等待恢复，不转迭代
+  const cancelledOnly = failed.filter((c) => ["CANCELLED", "TIMED_OUT"].includes(c.conclusion)).length === failed.length && failed.length > 0;
+  if (cancelledOnly && !(st?.ciRerunAt) || (Date.now() > (st?.ciRerunAt ?? 0))) {
+    log(`merge #${n}: test cancelled（runner 队列），rerun`);
+    await ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "run", "rerun", "--failed"]).catch((e) => log(`rerun #${n} failed: ${e.message}`));
+    setPR(n, { ...st, ciRerunAt: Date.now() + 300_000 });
+    return;
+  }
   if (failed.length > 0) {
     if (!st?.ciCommented) {
       // CI 失败 → 转入自动迭代修复（打 needs-work 让 iterateNeedsWorkPR 接手，模型带失败详情重改）
