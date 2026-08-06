@@ -131,25 +131,37 @@ async function reviewPR(pr) {
       setPR(n, { stage, verdict: v, ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}), ...(existing?.mergeFails ? { mergeFails: existing.mergeFails } : {}) });
       return;
     }
-    // 其次认 GitHub bot（应用）的 review 结论：优先 gemini-code-assist，其次任何 [bot]（如 copilot）
+    // 其次认 GitHub bot（应用）的 review 结论：优先 gemini-code-assist，其次任何 [bot]（如 copilot/claude）
     const reviews = await prReviews(n);
-    const bots = (reviews ?? []).filter((r) => /\[bot\]$/.test(r.author?.login ?? ""));
-    const ca = bots.filter((r) => /gemini-code-assist|claude|codex|copilot/i.test(r.author?.login));
+    const bots = (reviews ?? []).filter((r) => {
+      const login = r.author?.login ?? "";
+      return /\[bot\]$/.test(login) || /gemini-code-assist|claude|codex|copilot/i.test(login);
+    });
+    const ca = bots.filter((r) => /gemini-code-assist/i.test(r.author?.login ?? ""));
     const chosen = ca[ca.length - 1] ?? bots[bots.length - 1];
-    if (!chosen || !["APPROVED", "CHANGES_REQUESTED"].includes(chosen.state)) {
+    // gemini-code-assist 的 review 是 COMMENTED 纯评论（无标准 verdict）→ 按 body 语义判定：
+    // "no feedback / no review comments / looks good / LGTM" = 通过；明确阻断词 = 要求修改
+    let state = chosen?.state ?? "";
+    if (chosen && state === "COMMENTED" && /gemini-code-assist/i.test(chosen.author?.login ?? "")) {
+      const body = chosen.body ?? "";
+      state = /request changes|must fix|blocking|critical|严重|必须修改|阻断/i.test(body) && !/no (review )?comments|no feedback|looks good|LGTM|没有问题/i.test(body)
+        ? "CHANGES_REQUESTED" : "APPROVED";
+    }
+    if (!chosen || !["APPROVED", "CHANGES_REQUESTED"].includes(state)) {
       // 超时兜底：GitHub bot（gemini-code-assist/claude 等）未就绪时，15 分钟后转 local 自审，保证闭环不卡死
-      if (!existing?.reviewAt) setPR(n, { ...existing, reviewAt: Date.now() });
-      if (Date.now() - (existing?.reviewAt ?? 0) > 15 * 60 * 1000) {
+      const reviewAt = existing?.reviewAt ?? Date.now();
+      if (!existing?.reviewAt) setPR(n, { ...existing, reviewAt: reviewAt });
+      if (Date.now() - reviewAt > 15 * 60 * 1000) {
         log(`review #${n}: GitHub bot 审查超时（15min），转 local 自审兜底`);
         return await localReview(pr, existing);
       }
       log(`review #${n}: 等待 GitHub bot 审查（Code Assist ${ca.length > 0 ? "已审未决" : "未审"}，其他 bot ${bots.length} 条）...`);
       return;
     }
-    const already = existing?.stage === "review-done" && existing.verdict === (chosen.state === "APPROVED" ? "approve" : "needs-work");
+    const already = existing?.stage === "review-done" && existing.verdict === (state === "APPROVED" ? "approve" : "needs-work");
     if (already) return;
-    log(`review #${n}: ${chosen.author.login}=${chosen.state}`);
-    if (chosen.state === "APPROVED") {
+    log(`review #${n}: ${chosen.author.login}=${state}`);
+    if (state === "APPROVED") {
       await addLabels("pr", n, [TAGS.approve]);
       await ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.needsWork]).catch(() => {});
       await commentPR(n, `${BOT_TAG}: ${chosen.author.login} 已通过 ✅，等待 CI 绿后自动合并。`);
@@ -286,8 +298,9 @@ async function mergeApprovedPR(pr) {
   // CI 等待超时兜底：runner 排队/缺失超过 25 分钟 → 本地跑测试验证，通过则 owner 强制合并（绕过 required check），失败转迭代
   const pendingChecks = (checks ?? []).filter((c) => ["IN_PROGRESS", "QUEUED", "PENDING", "WAITING"].includes(c.state));
   if ((checks ?? []).length === 0 || pendingChecks.length > 0) {
-    if (!st?.ciWaitAt) setPR(n, { ...st, ciWaitAt: Date.now() });
-    if (Date.now() - (st?.ciWaitAt ?? 0) > 25 * 60 * 1000) {
+    const ciWaitAt = st?.ciWaitAt ?? Date.now();
+    if (!st?.ciWaitAt) setPR(n, { ...st, ciWaitAt: ciWaitAt });
+    if (Date.now() - ciWaitAt > 25 * 60 * 1000) {
       log(`merge #${n}: CI 排队/缺失超时（25min），本地验证后强制合并`);
       return await localVerifyMerge(pr);
     }
@@ -295,8 +308,9 @@ async function mergeApprovedPR(pr) {
   }
   const hasTest = (checks ?? []).some((c) => c.name === "test");
   if (!hasTest) {
-    if (!st?.ciWaitAt) setPR(n, { ...st, ciWaitAt: Date.now() });
-    if (Date.now() - (st?.ciWaitAt ?? 0) > 25 * 60 * 1000) {
+    const ciWaitAt = st?.ciWaitAt ?? Date.now();
+    if (!st?.ciWaitAt) setPR(n, { ...st, ciWaitAt: ciWaitAt });
+    if (Date.now() - ciWaitAt > 25 * 60 * 1000) {
       log(`merge #${n}: test check 缺失超时（25min），本地验证后强制合并`);
       return await localVerifyMerge(pr);
     }
