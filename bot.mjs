@@ -10,10 +10,10 @@ import {
   prDiff, prStatusChecks, prReviews, closePR,
 } from "./lib/gh.mjs";
 import { issueState, setIssue, prState, setPR } from "./lib/state.mjs";
-import { spawn, exec as execCb } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-const exec = promisify(execCb);
+const exec = promisify(execFile);
 import { ghRaw } from "./lib/gh.mjs";
 import { ensureLabels } from "./lib/labels.mjs";
 
@@ -347,7 +347,7 @@ async function reconcilePRs(prs) {
     const issueN = Number(m[1]);
     let issue;
     try { issue = await getIssue(issueN); } catch { continue; }
-    if (issue?.state === "closed") {
+    if ((issue?.state ?? "").toLowerCase() === "closed") {
       // issue 已关闭（被其他 PR 修复或人工处理）→ 关闭孤儿 PR，防永久 DIRTY 卡死
       log(`close orphan PR #${pr.number} (issue #${issueN} closed)`);
       await commentPR(pr.number, `${BOT_TAG}: 关联 issue #${issueN} 已关闭（可能已被其他 PR 修复），本 PR 自动关闭。`);
