@@ -134,7 +134,7 @@ async function reviewPR(pr) {
     // 其次认 GitHub bot（应用）的 review 结论：优先 gemini-code-assist，其次任何 [bot]（如 copilot）
     const reviews = await prReviews(n);
     const bots = (reviews ?? []).filter((r) => /\[bot\]$/.test(r.author?.login ?? ""));
-    const ca = bots.filter((r) => /gemini-code-assist/i.test(r.author?.login));
+    const ca = bots.filter((r) => /gemini-code-assist|claude|codex|copilot/i.test(r.author?.login));
     const chosen = ca[ca.length - 1] ?? bots[bots.length - 1];
     if (!chosen || !["APPROVED", "CHANGES_REQUESTED"].includes(chosen.state)) {
       log(`review #${n}: 等待 GitHub bot 审查（Code Assist ${ca.length > 0 ? "已审未决" : "未审"}，其他 bot ${bots.length} 条）...`);
