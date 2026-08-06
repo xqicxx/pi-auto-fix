@@ -10,7 +10,10 @@ import {
   prDiff, prStatusChecks, prReviews, closePR,
 } from "./lib/gh.mjs";
 import { issueState, setIssue, prState, setPR } from "./lib/state.mjs";
-import { spawn } from "node:child_process";
+import { spawn, exec as execCb } from "node:child_process";
+import { promisify } from "node:util";
+
+const exec = promisify(execCb);
 import { ghRaw } from "./lib/gh.mjs";
 import { ensureLabels } from "./lib/labels.mjs";
 
@@ -125,7 +128,7 @@ async function reviewPR(pr) {
       log(`review #${n}: Actions 标签 => ${v}`);
       // 保留 merge-blocked（防 loop）：merge 已因保护规则停止时，标签变化不重置
       const stage = existing?.stage === "merge-blocked" ? "merge-blocked" : "review-done";
-      setPR(n, { stage, verdict: v, ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+      setPR(n, { stage, verdict: v, ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}), ...(existing?.mergeFails ? { mergeFails: existing.mergeFails } : {}) });
       return;
     }
     // 其次认 GitHub bot（应用）的 review 结论：优先 gemini-code-assist，其次任何 [bot]（如 copilot）
@@ -144,12 +147,12 @@ async function reviewPR(pr) {
       await addLabels("pr", n, [TAGS.approve]);
       await ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.needsWork]).catch(() => {});
       await commentPR(n, `${BOT_TAG}: ${chosen.author.login} 已通过 ✅，等待 CI 绿后自动合并。`);
-      setPR(n, { stage: "review-done", verdict: "approve", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+      setPR(n, { stage: "review-done", verdict: "approve", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}), ...(existing?.mergeFails ? { mergeFails: existing.mergeFails } : {}) });
     } else {
       await addLabels("pr", n, [TAGS.needsWork]);
       await ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.approve]).catch(() => {});
       await commentPR(n, `${BOT_TAG}: ${chosen.author.login} 要求修改 ❌，进入自动迭代修复。`);
-      setPR(n, { stage: "review-done", verdict: "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+      setPR(n, { stage: "review-done", verdict: "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}), ...(existing?.mergeFails ? { mergeFails: existing.mergeFails } : {}) });
     }
     return;
   }
@@ -157,7 +160,7 @@ async function reviewPR(pr) {
   // local 引擎（显式设置 REVIEW_ENGINE=local 才启用；默认/服务均用 github-app）
   if (existing?.stage === "review-done" || existing?.stage === "merged") return;
   if (names.includes(TAGS.approve) || names.includes(TAGS.needsWork)) {
-    setPR(n, { stage: "review-done", verdict: names.includes(TAGS.approve) ? "approve" : "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+    setPR(n, { stage: "review-done", verdict: names.includes(TAGS.approve) ? "approve" : "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}), ...(existing?.mergeFails ? { mergeFails: existing.mergeFails } : {}) });
     return;
   }
   if (pr.isDraft) { setPR(n, { stage: "skip", reason: "draft" }); return; }
@@ -172,12 +175,12 @@ async function reviewPR(pr) {
   if (verdict.verdict === "approve") {
     await addLabels("pr", n, [TAGS.approve]);
     await commentPR(n, `${BOT_TAG}: **通过** ✅\n\n${sanitize(verdict.summary)}\n\n已标记 ai-approved，等待自动合并。`);
-    setPR(n, { stage: "review-done", verdict: "approve", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+    setPR(n, { stage: "review-done", verdict: "approve", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}), ...(existing?.mergeFails ? { mergeFails: existing.mergeFails } : {}) });
   } else {
     await addLabels("pr", n, [TAGS.needsWork]);
     const blockers = (verdict.blockers ?? []).slice(0, 5).map((b) => `- ${sanitize(b)}`).join("\n");
     await commentPR(n, `${BOT_TAG}: **需要修改** ❌\n\n${sanitize(verdict.summary)}\n\n阻断项:\n${blockers}`);
-    setPR(n, { stage: "review-done", verdict: "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}) });
+    setPR(n, { stage: "review-done", verdict: "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}), ...(existing?.mergeFails ? { mergeFails: existing.mergeFails } : {}) });
   }
 }
 
@@ -221,7 +224,7 @@ async function iterateNeedsWorkPR(pr) {
   try {
     await new Promise((resolve, reject) => {
       const child = spawn("node", ["/home/ubuntu/pi-auto-fix/fix-worker.mjs"], {
-        env: { ...process.env, AUTOFIX_PR: String(n), AUTOFIX_PR_BRANCH: pr.headRefName, AUTOFIX_PR_URL: pr.url, AUTOFIX_ROUND: String(round + 1) },
+        env: { ...process.env, AUTOFIX_PR: String(n), AUTOFIX_PR_BRANCH: pr.headRefName, AUTOFIX_PR_URL: pr.url, AUTOFIX_ROUND: String(round + 1), AUTOFIX_CI_FAILURE: st?.ciFailure ?? "" },
         stdio: "inherit",
       });
       const killer = setTimeout(() => { child.kill("SIGKILL"); }, 10 * 60_000);
@@ -229,9 +232,9 @@ async function iterateNeedsWorkPR(pr) {
         clearTimeout(killer);
         try {
           if (code === 0) {
-            // 移除 needs-work 标签，让下一轮 review 重新评估
+            // 移除 needs-work 标签，让下一轮 review 重新评估；重置 CI 失败标记（迭代后可能再失败，需再次转迭代）
             ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.needsWork]).catch(() => {});
-            setPR(n, { stage: "iterated", iterRound: round + 1 });
+            setPR(n, { stage: "iterated", iterRound: round + 1, ciCommented: false, ciFailure: "" });
             resolve();
           } else {
             setPR(n, { stage: "iterate-failed", iterRound: round + 1 });
@@ -268,13 +271,30 @@ async function mergeApprovedPR(pr) {
   // GitHub 原生拦截未绿合并——本地只做轻量检查，不轮询等待，下轮再试。
   const checks = await prStatusChecks(n);
   if ((checks ?? []).length === 0) return; // CI 未跑（ai-approved 标签刚打，labeled 触发有延迟），下轮再试
+  const hasTest = (checks ?? []).some((c) => c.name === "test");
+  if (!hasTest) {
+    // test check 缺失：ai-approved 可能是 GITHUB_TOKEN 打的（GitHub 抑制该事件触发其他 workflow），
+    // 用真人 token 重打标签（先删后加）触发 ci.yml 的 labeled 事件；失败下轮重试（节流 2 分钟）
+    if (!st?.ciRefireAt || Date.now() > st.ciRefireAt) {
+      log(`merge #${n}: test check 缺失，重打 ai-approved 标签触发 CI`);
+      await ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.approve]).catch(() => {});
+      await new Promise((r) => setTimeout(r, 3000));
+      await ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--add-label", TAGS.approve]).catch(() => {});
+      setPR(n, { ...st, ciRefireAt: Date.now() + 120_000 });
+    }
+    return;
+  }
   const pending = (checks ?? []).filter((c) => ["IN_PROGRESS", "QUEUED", "PENDING", "WAITING"].includes(c.state));
   if (pending.length > 0) return; // CI 还在跑，跳过本轮，下轮再试
   const failed = (checks ?? []).filter((c) => ["FAILURE", "CANCELLED", "TIMED_OUT"].includes(c.conclusion));
   if (failed.length > 0) {
     if (!st?.ciCommented) {
-      await commentPR(n, `${BOT_TAG}: CI 有失败（${failed.map((f) => f.name).join(", ")}），暂不合并。`);
-      setPR(n, { ...st, ciCommented: true });
+      // CI 失败 → 转入自动迭代修复（打 needs-work 让 iterateNeedsWorkPR 接手，模型带失败详情重改）
+      const details = await prFailedCheckDetails(n);
+      await commentPR(n, `${BOT_TAG}: CI 有失败（${failed.map((f) => f.name).join(", ")}），转入自动迭代修复。`);
+      await addLabels("pr", n, [TAGS.needsWork]);
+      await ghRaw(["-R", process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw", "pr", "edit", String(n), "--remove-label", TAGS.approve]).catch(() => {});
+      setPR(n, { ...st, ciCommented: true, verdict: "needs-work", stage: "review-done", ciFailure: details });
     }
     return;
   }
@@ -293,6 +313,59 @@ async function mergeApprovedPR(pr) {
       }
     } else {
       setPR(n, { ...st, mergeFails: fails });
+    }
+  }
+}
+
+// ================= PR 治理：冲突 rebase / 孤儿 PR 关闭 =================
+// 场景（issue #104 → PR #107）：issue 已被其他 PR 修复（closed）但 bot 的 PR 还挂着，
+// 或 PR 与 master 冲突后无人更新 → 永久 DIRTY 卡死（"无法合并也没有更改"）。
+// 1) 关联 issue 已关闭 → 关闭孤儿 PR（防止残留 DIRTY PR）
+// 2) PR 冲突但 issue 还 open → 自动 rebase master 更新分支（解决"没有更改"）
+
+async function rebasePR(pr) {
+  const repo = process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw";
+  const workdir = `/tmp/autofix-rebase-${pr.number}-${Date.now()}`;
+  try {
+    await exec("gh", ["repo", "clone", repo, workdir], { timeout: 180_000 });
+    await exec("git", ["checkout", pr.headRefName], { cwd: workdir, timeout: 30_000 });
+    await exec("git", ["pull", "--rebase", "origin", "master"], { cwd: workdir, timeout: 60_000 });
+    await exec("git", ["push", "--force-with-lease", "origin", pr.headRefName], { cwd: workdir, timeout: 60_000 });
+    return true;
+  } catch (e) {
+    log(`rebase #${pr.number} failed: ${e.message}`);
+    return false;
+  } finally {
+    await exec("rm", ["-rf", workdir]).catch(() => {});
+  }
+}
+
+async function reconcilePRs(prs) {
+  for (const pr of prs) {
+    const m = /fix #(\d+)/.exec(pr.title ?? "");
+    if (!m) continue;
+    const issueN = Number(m[1]);
+    let issue;
+    try { issue = await getIssue(issueN); } catch { continue; }
+    if (issue?.state === "closed") {
+      // issue 已关闭（被其他 PR 修复或人工处理）→ 关闭孤儿 PR，防永久 DIRTY 卡死
+      log(`close orphan PR #${pr.number} (issue #${issueN} closed)`);
+      await commentPR(pr.number, `${BOT_TAG}: 关联 issue #${issueN} 已关闭（可能已被其他 PR 修复），本 PR 自动关闭。`);
+      await closePR(pr.number);
+      setPR(pr.number, { stage: "closed-orphan", reason: "issue-closed", ts: Date.now() });
+      continue;
+    }
+    // PR 冲突但 issue 还 open → 自动 rebase 更新（否则永远卡在 DIRTY，无新 commit）
+    if (pr.mergeable === "CONFLICTING" && process.env.AUTOFIX_REBASE !== "0") {
+      log(`rebase PR #${pr.number} (conflicting, issue #${issueN} still open)`);
+      const ok = await rebasePR(pr);
+      if (ok) {
+        await commentPR(pr.number, `${BOT_TAG}: 检测到与 master 冲突，已自动 rebase 更新 ✅`);
+        const prev = prState(pr.number) ?? {};
+        setPR(pr.number, { ...prev, stage: "review-done", rebasedAt: Date.now() });
+      } else {
+        await commentPR(pr.number, `${BOT_TAG}: 自动 rebase 失败，请人工处理冲突。`).catch(() => {});
+      }
     }
   }
 }
@@ -357,6 +430,8 @@ async function tick() {
     for (const issue of issues) {
       try { await triageIssue(issue); } catch (e) { log(`triage #${issue.number} err: ${e.message}`); }
     }
+    // PR 治理：孤儿 PR 关闭 / 冲突自动 rebase（issue #104 → PR #107 卡死场景）
+    try { await reconcilePRs(prs); } catch (e) { log(`reconcile err: ${e.message}`); }
     // review 引擎见模块顶部注释：github 引擎已弃用（与 CI 双重消耗 Actions 额度）
     for (const pr of prs) {
       try { if (REVIEW_ENGINE !== "github") await reviewPR(pr); } catch (e) { log(`review #${pr.number} err: ${e.message}`); }

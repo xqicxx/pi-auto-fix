@@ -242,6 +242,11 @@ async function main() {
         + (actionsReviews.length > 0 ? String.fromCharCode(10) + "### GitHub Actions Gemini Review 意见" + String.fromCharCode(10) + (actionsReviews[0]?.body ?? "").slice(0, 3000) : "")
         + (caBody ? String.fromCharCode(10) + "### Gemini Code Assist 意见" + String.fromCharCode(10) + caBody : "");
     }
+    // CI 测试失败详情（由 bot 在检测到 test 失败时注入）——模型必须针对失败测试修复
+    const ciFailure = process.env.AUTOFIX_CI_FAILURE || "";
+    if (ciFailure) {
+      reviewContext += (reviewContext ? String.fromCharCode(10).repeat(2) : "") + "### CI 测试失败详情（必须修复，重点看失败断言/堆栈）" + String.fromCharCode(10) + ciFailure.slice(0, 6000);
+    }
     log("iterating PR #" + PR_ITER + ":", pr.title.slice(0, 60));
   }
 
