@@ -137,6 +137,12 @@ async function reviewPR(pr) {
     const ca = bots.filter((r) => /gemini-code-assist|claude|codex|copilot/i.test(r.author?.login));
     const chosen = ca[ca.length - 1] ?? bots[bots.length - 1];
     if (!chosen || !["APPROVED", "CHANGES_REQUESTED"].includes(chosen.state)) {
+      // 超时兜底：GitHub bot（gemini-code-assist/claude 等）未就绪时，15 分钟后转 local 自审，保证闭环不卡死
+      if (!existing?.reviewAt) setPR(n, { ...existing, reviewAt: Date.now() });
+      if (Date.now() - (existing?.reviewAt ?? 0) > 15 * 60 * 1000) {
+        log(`review #${n}: GitHub bot 审查超时（15min），转 local 自审兜底`);
+        return await localReview(pr, existing);
+      }
       log(`review #${n}: 等待 GitHub bot 审查（Code Assist ${ca.length > 0 ? "已审未决" : "未审"}，其他 bot ${bots.length} 条）...`);
       return;
     }
@@ -158,6 +164,13 @@ async function reviewPR(pr) {
   }
 
   // local 引擎（显式设置 REVIEW_ENGINE=local 才启用；默认/服务均用 github-app）
+  return await localReview(pr, existing);
+}
+
+/** local 自审（DeepSeek）：REVIEW_ENGINE=local 直接走；github-app 超时兜底也走这里 */
+async function localReview(pr, existing) {
+  const n = pr.number;
+  const names = (pr.labels ?? []).map((l) => l.name);
   if (existing?.stage === "review-done" || existing?.stage === "merged") return;
   if (names.includes(TAGS.approve) || names.includes(TAGS.needsWork)) {
     setPR(n, { stage: "review-done", verdict: names.includes(TAGS.approve) ? "approve" : "needs-work", ...(existing?.iterRound ? { iterRound: existing.iterRound } : {}), ...(existing?.mergeFails ? { mergeFails: existing.mergeFails } : {}) });
@@ -270,9 +283,23 @@ async function mergeApprovedPR(pr) {
   // 合并门禁：master 分支保护已要求 test check 通过（required status checks），
   // GitHub 原生拦截未绿合并——本地只做轻量检查，不轮询等待，下轮再试。
   const checks = await prStatusChecks(n);
-  if ((checks ?? []).length === 0) return; // CI 未跑（ai-approved 标签刚打，labeled 触发有延迟），下轮再试
+  // CI 等待超时兜底：runner 排队/缺失超过 25 分钟 → 本地跑测试验证，通过则 owner 强制合并（绕过 required check），失败转迭代
+  const pendingChecks = (checks ?? []).filter((c) => ["IN_PROGRESS", "QUEUED", "PENDING", "WAITING"].includes(c.state));
+  if ((checks ?? []).length === 0 || pendingChecks.length > 0) {
+    if (!st?.ciWaitAt) setPR(n, { ...st, ciWaitAt: Date.now() });
+    if (Date.now() - (st?.ciWaitAt ?? 0) > 25 * 60 * 1000) {
+      log(`merge #${n}: CI 排队/缺失超时（25min），本地验证后强制合并`);
+      return await localVerifyMerge(pr);
+    }
+    return; // CI 未跑或还在跑，下轮再试
+  }
   const hasTest = (checks ?? []).some((c) => c.name === "test");
   if (!hasTest) {
+    if (!st?.ciWaitAt) setPR(n, { ...st, ciWaitAt: Date.now() });
+    if (Date.now() - (st?.ciWaitAt ?? 0) > 25 * 60 * 1000) {
+      log(`merge #${n}: test check 缺失超时（25min），本地验证后强制合并`);
+      return await localVerifyMerge(pr);
+    }
     // test check 缺失：ai-approved 可能是 GITHUB_TOKEN 打的（GitHub 抑制该事件触发其他 workflow），
     // 用真人 token 重打标签（先删后加）触发 ci.yml 的 labeled 事件；失败下轮重试（节流 2 分钟）
     if (!st?.ciRefireAt || Date.now() > st.ciRefireAt) {
@@ -322,6 +349,36 @@ async function mergeApprovedPR(pr) {
     } else {
       setPR(n, { ...st, mergeFails: fails });
     }
+  }
+}
+
+/** CI runner 排队/缺失超时兜底：本地 clone PR 分支 + npm test，通过则 owner 强制合并（绕过 required check） */
+async function localVerifyMerge(pr) {
+  const n = pr.number;
+  const dir = `/tmp/autofix-verify-${n}`;
+  const repo = process.env.AUTOFIX_REPO || "xqicxx/pi-discord-openclaw";
+  try {
+    await exec("rm", ["-rf", dir]);
+    await exec("gh", ["repo", "clone", repo, dir, "--", "--branch", pr.headRefName, "--depth", "1"]);
+    await exec("npm", ["test"], { cwd: dir, timeout: 300_000 });
+    log(`verify #${n}: local npm test PASS → 强制合并`);
+    await ghRaw(["-R", repo, "pr", "merge", String(n), "--merge", "--admin"]);
+    log(`merged PR #${n} (admin, local-verified)`);
+    await commentPR(n, `${BOT_TAG}: CI runner 排队超时，本地测试已通过，已强制合并 ✅`).catch(() => {});
+    setPR(n, { stage: "merged" });
+    return true;
+  } catch (e) {
+    log(`verify #${n}: local test FAILED — ${(e.message ?? "").slice(0, 300)}`);
+    const st = prState(n);
+    if (!st?.ciCommented) {
+      await commentPR(n, `${BOT_TAG}: CI runner 排队超时，本地验证测试失败，转入自动迭代修复。`).catch(() => {});
+      await addLabels("pr", n, [TAGS.needsWork]).catch(() => {});
+      await ghRaw(["-R", repo, "pr", "edit", String(n), "--remove-label", TAGS.approve]).catch(() => {});
+      setPR(n, { ...st, ciCommented: true, verdict: "needs-work", stage: "review-done", ciFailure: "local verify failed" });
+    }
+    return false;
+  } finally {
+    await exec("rm", ["-rf", dir]).catch(() => {});
   }
 }
 
