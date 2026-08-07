@@ -420,7 +420,10 @@ async function rebasePR(pr) {
 }
 
 async function reconcilePRs(prs) {
-  for (const pr of prs) {
+  // 倒序遍历：关闭孤儿 PR 时从本 tick 的后续阶段（review/iterate/merge）移除，
+  // 避免对已关闭 PR 白烧模型调用/打标（reconcile 后数组仍是启动时快照）
+  for (let i = prs.length - 1; i >= 0; i--) {
+    const pr = prs[i];
     const m = /fix #(\d+)/.exec(pr.title ?? "");
     if (!m) continue;
     const issueN = Number(m[1]);
@@ -432,6 +435,7 @@ async function reconcilePRs(prs) {
       await commentPR(pr.number, `${BOT_TAG}: 关联 issue #${issueN} 已关闭（可能已被其他 PR 修复），本 PR 自动关闭。`);
       await closePR(pr.number);
       setPR(pr.number, { stage: "closed-orphan", reason: "issue-closed", ts: Date.now() });
+      prs.splice(i, 1);
       continue;
     }
     // PR 冲突但 issue 还 open → 自动 rebase 更新（否则永远卡在 DIRTY，无新 commit）
